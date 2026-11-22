@@ -996,6 +996,14 @@ pub struct Corpus {
     obscure_error_reporter: ObscureErrorReporter,
 }
 
+impl Drop for Corpus {
+    fn drop(&mut self) {
+        for supply in self.energy_supplies.values() {
+            supply.write().disconnect_diverters();
+        }
+    }
+}
+
 impl Corpus {
     pub(crate) fn from_inputs(
         input: Arc<Input>,
@@ -8152,7 +8160,7 @@ mod tests {
             hot_water_sources,
             wwhrs,
             ..
-        } = corpus;
+        } = &corpus;
 
         let WaterSupply::Wwhrs(wwhrs_source) = hot_water_sources["hw_pou"].get_cold_water_source()
         else {
@@ -8332,7 +8340,7 @@ mod tests {
         )
         .unwrap();
 
-        let pre_heated_sources = corpus.pre_heated_water_sources;
+        let pre_heated_sources = &corpus.pre_heated_water_sources;
 
         assert!(pre_heated_sources.contains_key("tank1"));
         assert!(pre_heated_sources.contains_key("tank2"));
@@ -8650,6 +8658,49 @@ mod tests {
         assert_eq!(
             charging_conns.iter().map(|x| x.as_str()).collect_vec(),
             vec!["hb1", "hp_pcm_charging: hb1"]
+        );
+    }
+
+    #[rstest]
+    fn test_pv_diverter_no_arc_memory_leak() {
+        let input_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/input/core/short/demo_FHS.json"
+        );
+        let tariff_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/tariff_data/tariff_data_25-06-2024.csv"
+        );
+
+        let file = std::fs::File::open(input_path).unwrap();
+        let input: Input = serde_json::from_reader(std::io::BufReader::new(file)).unwrap();
+
+        let corpus = Corpus::from_inputs(
+            Arc::new(input),
+            None,
+            Some(tariff_path),
+            &OutputOptions::default(),
+        )
+        .unwrap();
+
+        assert!(
+            !corpus.diverters.is_empty(),
+            "demo_FHS.json should configure at least one PV diverter"
+        );
+
+        let weak_supply = Arc::downgrade(&corpus.energy_supplies["mains elec"]);
+        let weak_diverter = Arc::downgrade(&corpus.diverters[0]);
+
+        corpus.run().unwrap();
+        drop(corpus);
+
+        assert!(
+            weak_supply.upgrade().is_none(),
+            "EnergySupply leaked after dropping Corpus"
+        );
+        assert!(
+            weak_diverter.upgrade().is_none(),
+            "PVDiverter leaked after dropping Corpus"
         );
     }
 }

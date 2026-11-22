@@ -21,7 +21,6 @@ use crate::StringOrNumber;
 use accurate::{sum::Sum2, traits::*};
 use anyhow::{anyhow, bail};
 use approx::relative_eq;
-use arc_swap::ArcSwapOption;
 use arcstr::ArcStr;
 use atomic_float::AtomicF64;
 use educe::Educe;
@@ -32,7 +31,7 @@ use parking_lot::{Mutex, RwLock};
 use std::iter;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
 
 type ControlMaxDiverter = SetpointOrCombinationControl;
 
@@ -3347,7 +3346,7 @@ pub struct ImmersionHeater {
     energy_supply_connection: EnergySupplyConnection,
     simulation_timestep: f64,
     control: Option<CompositeRangeTimeControl>,
-    diverter: ArcSwapOption<RwLock<PVDiverter>>,
+    diverter: OnceLock<Weak<RwLock<PVDiverter>>>,
 }
 
 /// An object to represent an immersion heater
@@ -3371,7 +3370,7 @@ impl ImmersionHeater {
             energy_supply_connection,
             simulation_timestep,
             control,
-            diverter: Default::default(),
+            diverter: OnceLock::new(),
         }
     }
 
@@ -3383,12 +3382,10 @@ impl ImmersionHeater {
         }
     }
 
-    pub(crate) fn connect_diverter(&self, diverter: Arc<RwLock<PVDiverter>>) {
-        if self.diverter.load_full().is_some() {
+    pub(crate) fn connect_diverter(&self, diverter: Weak<RwLock<PVDiverter>>) {
+        if self.diverter.set(diverter).is_err() {
             panic!("diverter was already connected");
         }
-
-        self.diverter.swap(Some(diverter));
     }
 
     /// Demand energy (in kWh) from the heater
@@ -3418,7 +3415,7 @@ impl ImmersionHeater {
 
         // If there is a diverter to this immersion heater, then any heating
         // capacity already in use is not available to the diverter.
-        if let Some(ref diverter) = &self.diverter.load_full() {
+        if let Some(diverter) = self.diverter.get().and_then(Weak::upgrade) {
             diverter.read().increment_capacity_used(energy_supplied);
         }
 
@@ -3629,7 +3626,7 @@ impl PVDiverter {
             capacity_used: Default::default(),
         }));
 
-        heat_source.lock().connect_diverter(diverter.clone());
+        heat_source.lock().connect_diverter(Arc::downgrade(&diverter));
 
         diverter
     }
